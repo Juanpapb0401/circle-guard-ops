@@ -78,7 +78,8 @@ pipeline {
                             docker build \
                                 -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER} \
                                 -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:latest \
-                                src/services/circleguard-${SERVICE}-service/
+                                -f src/services/circleguard-${SERVICE}-service/Dockerfile \
+                                src/
                             docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}
                             docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:latest
                         done
