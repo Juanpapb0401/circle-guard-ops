@@ -1,0 +1,291 @@
+// Pipeline MASTER — pipeline completo + E2E + performance + Release Notes + deploy a prod
+// Credenciales requeridas: mismas que Jenkinsfile.dev
+// Flujo: build → unit → integration → docker push → deploy stage → E2E/perf contra stage → Release Notes → deploy prod
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'DEV_REPO_BRANCH', defaultValue: 'main', description: 'Branch a promover a producción')
+    }
+
+    environment {
+        ACR_NAME         = 'circleguardacr'
+        ACR_LOGIN_SERVER = "${ACR_NAME}.azurecr.io"
+        RESOURCE_GROUP   = 'circleguard-rg'
+        AKS_CLUSTER      = 'circleguard-aks'
+        STAGE_NAMESPACE  = 'circleguard-stage'
+        PROD_NAMESPACE   = 'circleguard-prod'
+        DEV_REPO_URL     = 'https://github.com/jcmunozf/circle-guard-public.git'
+        SERVICES         = 'auth identity promotion notification form gateway'
+    }
+
+    stages {
+        stage('Checkout Dev Repo') {
+            steps {
+                dir('src') {
+                    git url: "${DEV_REPO_URL}", branch: "${params.DEV_REPO_BRANCH}"
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                dir('src') {
+                    sh './gradlew build -x test --parallel'
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                dir('src') {
+                    sh '''
+                        ./gradlew \
+                            :services:circleguard-auth-service:test \
+                            :services:circleguard-identity-service:test \
+                            :services:circleguard-form-service:test \
+                            :services:circleguard-gateway-service:test \
+                            :services:circleguard-notification-service:test \
+                            --parallel
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'src/services/*/build/test-results/**/*.xml'
+                }
+            }
+        }
+
+        stage('Integration Tests') {
+            steps {
+                dir('src') {
+                    sh '''
+                        ./gradlew \
+                            :services:circleguard-auth-service:test \
+                            :services:circleguard-identity-service:test \
+                            :services:circleguard-form-service:test \
+                            :services:circleguard-gateway-service:test \
+                            :services:circleguard-notification-service:test \
+                            -Dspring.profiles.active=integration \
+                            --parallel
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'src/services/*/build/test-results/**/*.xml'
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'AZURE_CLIENT_ID',      variable: 'ARM_CLIENT_ID'),
+                    string(credentialsId: 'AZURE_CLIENT_SECRET',   variable: 'ARM_CLIENT_SECRET'),
+                    string(credentialsId: 'AZURE_TENANT_ID',       variable: 'ARM_TENANT_ID'),
+                    string(credentialsId: 'AZURE_SUBSCRIPTION_ID', variable: 'ARM_SUBSCRIPTION_ID')
+                ]) {
+                    sh '''
+                        az login --service-principal \
+                            --username $ARM_CLIENT_ID \
+                            --password $ARM_CLIENT_SECRET \
+                            --tenant   $ARM_TENANT_ID
+                        az account set --subscription $ARM_SUBSCRIPTION_ID
+                        az acr login --name ${ACR_NAME}
+
+                        for SERVICE in ${SERVICES}; do
+                            docker build \
+                                -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER} \
+                                -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:prod \
+                                src/services/circleguard-${SERVICE}-service/
+                            docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}
+                            docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:prod
+                        done
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Stage') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'AZURE_CLIENT_ID',      variable: 'ARM_CLIENT_ID'),
+                    string(credentialsId: 'AZURE_CLIENT_SECRET',   variable: 'ARM_CLIENT_SECRET'),
+                    string(credentialsId: 'AZURE_TENANT_ID',       variable: 'ARM_TENANT_ID'),
+                    string(credentialsId: 'AZURE_SUBSCRIPTION_ID', variable: 'ARM_SUBSCRIPTION_ID')
+                ]) {
+                    sh '''
+                        az login --service-principal \
+                            --username $ARM_CLIENT_ID \
+                            --password $ARM_CLIENT_SECRET \
+                            --tenant   $ARM_TENANT_ID
+                        az account set --subscription $ARM_SUBSCRIPTION_ID
+                        az aks get-credentials \
+                            --resource-group ${RESOURCE_GROUP} \
+                            --name           ${AKS_CLUSTER} \
+                            --overwrite-existing
+
+                        for SERVICE in ${SERVICES}; do
+                            sed -i "s|${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:.*|${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}|g" \
+                                k8s/services/${SERVICE}-service.yaml
+                        done
+
+                        kubectl apply -f k8s/infrastructure/ -n ${STAGE_NAMESPACE}
+                        kubectl apply -f k8s/services/       -n ${STAGE_NAMESPACE}
+                        kubectl rollout status deployment    -n ${STAGE_NAMESPACE} --timeout=300s
+                    '''
+                }
+            }
+        }
+
+        stage('E2E Tests') {
+            // Los tests E2E en src/tests/e2e/ usan port-forward para alcanzar los servicios en stage.
+            // Requiere Python 3 y pip en el agente.
+            steps {
+                sh '''
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/auth-service     8180:8180 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/identity-service 8083:8083 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/form-service     8086:8086 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/gateway-service  8087:8087 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/promotion-service 8088:8088 &
+                    sleep 10
+
+                    pip3 install -r src/tests/e2e/requirements.txt --quiet
+                    pytest src/tests/e2e/ \
+                        --junitxml=e2e-results.xml \
+                        --tb=short \
+                        -v
+
+                    pkill -f "kubectl port-forward" || true
+                '''
+            }
+            post {
+                always {
+                    junit 'e2e-results.xml'
+                }
+            }
+        }
+
+        stage('Performance Tests') {
+            // Locust ejecuta pruebas de carga contra el gateway y auth en stage.
+            steps {
+                sh '''
+                    pip3 install locust --quiet
+
+                    locust \
+                        --headless \
+                        --users 50 \
+                        --spawn-rate 5 \
+                        --run-time 60s \
+                        --host http://localhost:8087 \
+                        --locustfile src/tests/performance/locustfile.py \
+                        --html locust-report.html \
+                        --csv  locust-report
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'locust-report*.html,locust-report*.csv', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Generate Release Notes') {
+            steps {
+                sh '''
+                    PREV_TAG=$(git -C src describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+
+                    if [ -z "$PREV_TAG" ]; then
+                        COMMITS=$(git -C src log --oneline --pretty=format:"- %h %s (%an)")
+                    else
+                        COMMITS=$(git -C src log ${PREV_TAG}..HEAD --oneline --pretty=format:"- %h %s (%an)")
+                    fi
+
+                    cat > release-notes.md << NOTES
+# Release Notes — v${BUILD_NUMBER}
+
+**Fecha:** $(date +%Y-%m-%d)
+**Build:** ${BUILD_NUMBER}
+**Branch:** ${params.DEV_REPO_BRANCH}
+${PREV_TAG:+**Desde tag:** ${PREV_TAG}}
+
+## Cambios incluidos
+
+${COMMITS:-Sin commits nuevos desde el último tag}
+
+## Servicios desplegados
+
+| Servicio        | Puerto | Imagen                                              |
+|-----------------|--------|-----------------------------------------------------|
+| Auth            | 8180   | ${ACR_LOGIN_SERVER}/circleguard-auth:${BUILD_NUMBER}         |
+| Identity        | 8083   | ${ACR_LOGIN_SERVER}/circleguard-identity:${BUILD_NUMBER}     |
+| Promotion       | 8088   | ${ACR_LOGIN_SERVER}/circleguard-promotion:${BUILD_NUMBER}    |
+| Notification    | 8082   | ${ACR_LOGIN_SERVER}/circleguard-notification:${BUILD_NUMBER} |
+| Form            | 8086   | ${ACR_LOGIN_SERVER}/circleguard-form:${BUILD_NUMBER}         |
+| Gateway         | 8087   | ${ACR_LOGIN_SERVER}/circleguard-gateway:${BUILD_NUMBER}      |
+NOTES
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'release-notes.md', fingerprint: true
+                }
+            }
+        }
+
+        stage('Tag Release') {
+            steps {
+                withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GH_TOKEN')]) {
+                    sh '''
+                        git -C src config user.email "jenkins@circleguard.local"
+                        git -C src config user.name  "Jenkins CI"
+                        git -C src tag -a "v${BUILD_NUMBER}" -m "Release v${BUILD_NUMBER} — automated by Jenkins"
+
+                        DEV_ORIGIN=$(git -C src remote get-url origin | sed "s|https://|https://${GH_TOKEN}@|")
+                        git -C src push ${DEV_ORIGIN} "v${BUILD_NUMBER}"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Prod') {
+            input {
+                message "Desplegar build ${BUILD_NUMBER} a PRODUCCIÓN?"
+                ok "Sí, desplegar"
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'AZURE_CLIENT_ID',      variable: 'ARM_CLIENT_ID'),
+                    string(credentialsId: 'AZURE_CLIENT_SECRET',   variable: 'ARM_CLIENT_SECRET'),
+                    string(credentialsId: 'AZURE_TENANT_ID',       variable: 'ARM_TENANT_ID'),
+                    string(credentialsId: 'AZURE_SUBSCRIPTION_ID', variable: 'ARM_SUBSCRIPTION_ID')
+                ]) {
+                    sh '''
+                        az login --service-principal \
+                            --username $ARM_CLIENT_ID \
+                            --password $ARM_CLIENT_SECRET \
+                            --tenant   $ARM_TENANT_ID
+                        az account set --subscription $ARM_SUBSCRIPTION_ID
+                        az aks get-credentials \
+                            --resource-group ${RESOURCE_GROUP} \
+                            --name           ${AKS_CLUSTER} \
+                            --overwrite-existing
+
+                        kubectl apply -f k8s/infrastructure/ -n ${PROD_NAMESPACE}
+                        kubectl apply -f k8s/services/       -n ${PROD_NAMESPACE}
+                        kubectl rollout status deployment    -n ${PROD_NAMESPACE} --timeout=300s
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success { echo "Release v${BUILD_NUMBER} desplegado en producción exitosamente" }
+        failure { echo "Pipeline MASTER falló en build ${BUILD_NUMBER}" }
+        always  { cleanWs() }
+    }
+}

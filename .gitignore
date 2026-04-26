@@ -1,0 +1,15 @@
+# Terraform secrets — NUNCA commitear
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/crash.log
+terraform/override.tf
+terraform/override.tf.json
+
+# Jenkins
+jenkins/secrets/
+
+# General
+.DS_Store
+*.log
