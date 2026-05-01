@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: auth-service
-          image: circleguardacr.azurecr.io/circleguard-auth:9
+          image: circleguardacr.azurecr.io/circleguard-auth:11
           ports:
             - containerPort: 8180
           env:
