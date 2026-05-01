@@ -42,6 +42,8 @@ spec:
               value: "circleguard_pass"
             - name: POSTGRES_DB
               value: "circleguard"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
