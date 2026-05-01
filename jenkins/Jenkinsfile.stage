@@ -5,7 +5,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'DEV_REPO_BRANCH', defaultValue: 'develop', description: 'Branch del dev repo (normalmente develop)')
+        string(name: 'DEV_REPO_BRANCH', defaultValue: 'main', description: 'Branch del dev repo (normalmente main)')
     }
 
     environment {
@@ -68,7 +68,6 @@ pipeline {
                             :services:circleguard-form-service:test \
                             :services:circleguard-gateway-service:test \
                             :services:circleguard-notification-service:test \
-                            -Dspring.profiles.active=integration \
                             --parallel
                     '''
                 }
