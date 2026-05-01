@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: promotion-service
-          image: circleguardacr.azurecr.io/circleguard-promotion:latest
+          image: circleguardacr.azurecr.io/circleguard-promotion:9
           ports:
             - containerPort: 8088
           env:
