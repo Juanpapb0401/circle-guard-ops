@@ -16,7 +16,7 @@ pipeline {
         AKS_CLUSTER      = 'circleguard-aks'
         STAGE_NAMESPACE  = 'circleguard-stage'
         PROD_NAMESPACE   = 'circleguard-prod'
-        DEV_REPO_URL     = 'https://github.com/jcmunozf/circle-guard-public.git'
+        DEV_REPO_URL     = 'https://github.com/Juanpapb0401/circle-guard-public.git'
         SERVICES         = 'auth identity promotion notification form gateway'
     }
 
