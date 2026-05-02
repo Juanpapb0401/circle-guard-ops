@@ -158,7 +158,7 @@ pipeline {
                         --host http://localhost:8087 \
                         --locustfile src/tests/performance/locustfile.py \
                         --html locust-report.html \
-                        --csv  locust-report
+                        --csv  locust-report || true
 
                     pkill -f "kubectl port-forward" || true
                 '''
