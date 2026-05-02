@@ -143,13 +143,13 @@ pipeline {
                     kubectl port-forward -n ${STAGE_NAMESPACE} svc/notification-service  8082:8082 &
                     sleep 15
 
-                    pip3 install -r src/tests/e2e/requirements.txt --quiet
+                    pip3 install -r src/tests/e2e/requirements.txt --quiet --break-system-packages
                     pytest src/tests/e2e/ \
                         --junitxml=e2e-results.xml \
                         --tb=short \
                         -v
 
-                    pip3 install locust --quiet
+                    pip3 install locust --quiet --break-system-packages
                     locust \
                         --headless \
                         --users 50 \
@@ -165,7 +165,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'e2e-results.xml'
+                    junit allowEmptyResults: true, testResults: 'e2e-results.xml'
                     archiveArtifacts artifacts: 'locust-report*.html,locust-report*.csv', allowEmptyArchive: true
                 }
             }
