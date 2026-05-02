@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: form-service
-          image: circleguardacr.azurecr.io/circleguard-form:7
+          image: circleguardacr.azurecr.io/circleguard-form:8
           ports:
             - containerPort: 8086
           env:
