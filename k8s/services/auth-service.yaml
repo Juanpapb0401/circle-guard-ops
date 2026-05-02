@@ -41,6 +41,8 @@ spec:
               value: "k8s"
             - name: MANAGEMENT_HEALTH_LDAP_ENABLED
               value: "false"
+            - name: IDENTITY_SERVICE_URL
+              value: "http://identity-service:8083"
           resources:
             requests:
               memory: "256Mi"
