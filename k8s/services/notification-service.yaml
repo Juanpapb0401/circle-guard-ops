@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: notification-service
-          image: circleguardacr.azurecr.io/circleguard-notification:1
+          image: circleguardacr.azurecr.io/circleguard-notification:2
           ports:
             - containerPort: 8082
           env:
