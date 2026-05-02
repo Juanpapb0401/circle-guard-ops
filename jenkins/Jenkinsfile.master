@@ -1,6 +1,5 @@
-// Pipeline MASTER — pipeline completo + E2E + performance + Release Notes + deploy a prod
+// Pipeline MASTER — build + unit/integration tests + docker push + deploy stage + E2E/perf + Release Notes + deploy prod
 // Credenciales requeridas: mismas que Jenkinsfile.dev
-// Flujo: build → unit → integration → docker push → deploy stage → E2E/perf contra stage → Release Notes → deploy prod
 
 pipeline {
     agent any
@@ -29,46 +28,20 @@ pipeline {
             }
         }
 
-        stage('Build') {
+        stage('Build & Test') {
+            // Una sola invocación Gradle: compila + unit tests + integration tests en paralelo.
+            // Se excluyen los tests de promotion-service: usan Testcontainers (Neo4j) que requiere
+            // conectividad TCP al Docker daemon, incompatible con el Jenkins-in-Docker de este setup.
+            // Al final renombra cada bootJar a app.jar (nombre esperado por los Dockerfiles).
             steps {
                 dir('src') {
-                    sh './gradlew build -x test --parallel'
-                }
-            }
-        }
-
-        stage('Unit Tests') {
-            steps {
-                dir('src') {
+                    sh './gradlew build -x :services:circleguard-promotion-service:test --parallel'
                     sh '''
-                        ./gradlew \
-                            :services:circleguard-auth-service:test \
-                            :services:circleguard-identity-service:test \
-                            :services:circleguard-form-service:test \
-                            :services:circleguard-gateway-service:test \
-                            :services:circleguard-notification-service:test \
-                            --parallel
-                    '''
-                }
-            }
-            post {
-                always {
-                    junit 'src/services/*/build/test-results/**/*.xml'
-                }
-            }
-        }
-
-        stage('Integration Tests') {
-            steps {
-                dir('src') {
-                    sh '''
-                        ./gradlew \
-                            :services:circleguard-auth-service:test \
-                            :services:circleguard-identity-service:test \
-                            :services:circleguard-form-service:test \
-                            :services:circleguard-gateway-service:test \
-                            :services:circleguard-notification-service:test \
-                            --parallel
+                        for SERVICE in ${SERVICES}; do
+                            LIBS="services/circleguard-${SERVICE}-service/build/libs"
+                            JAR=$(ls ${LIBS}/*.jar | grep -v plain | head -1)
+                            cp "$JAR" "${LIBS}/app.jar"
+                        done
                     '''
                 }
             }
@@ -80,6 +53,8 @@ pipeline {
         }
 
         stage('Docker Build & Push') {
+            // Builds en paralelo (subshells en background + wait).
+            // --platform linux/amd64 requerido: Jenkins corre en macOS Apple Silicon, AKS es linux/amd64.
             steps {
                 withCredentials([
                     string(credentialsId: 'AZURE_CLIENT_ID',      variable: 'ARM_CLIENT_ID'),
@@ -96,14 +71,18 @@ pipeline {
                         az acr login --name ${ACR_NAME}
 
                         for SERVICE in ${SERVICES}; do
-                            docker build \
-                                -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER} \
-                                -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:prod \
-                                -f src/services/circleguard-${SERVICE}-service/Dockerfile \
-                                src/
-                            docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}
-                            docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:prod
+                            (
+                                docker build \
+                                    --platform linux/amd64 \
+                                    -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER} \
+                                    -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:prod \
+                                    -f src/services/circleguard-${SERVICE}-service/Dockerfile \
+                                    src/
+                                docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}
+                                docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:prod
+                            ) &
                         done
+                        wait $(jobs -p)
                     '''
                 }
             }
@@ -156,12 +135,13 @@ pipeline {
             // Requiere Python 3 y pip en el agente (instalados en el Dockerfile de Jenkins).
             steps {
                 sh '''
-                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/auth-service      8180:8180 &
-                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/identity-service  8083:8083 &
-                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/form-service      8086:8086 &
-                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/gateway-service   8087:8087 &
-                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/promotion-service 8088:8088 &
-                    sleep 10
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/auth-service         8180:8180 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/identity-service      8083:8083 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/form-service          8086:8086 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/gateway-service       8087:8087 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/promotion-service     8088:8088 &
+                    kubectl port-forward -n ${STAGE_NAMESPACE} svc/notification-service  8082:8082 &
+                    sleep 15
 
                     pip3 install -r src/tests/e2e/requirements.txt --quiet
                     pytest src/tests/e2e/ \
@@ -216,14 +196,14 @@ ${COMMITS:-Sin commits nuevos desde el último tag}
 
 ## Servicios desplegados
 
-| Servicio        | Puerto | Imagen                                              |
-|-----------------|--------|-----------------------------------------------------|
-| Auth            | 8180   | ${ACR_LOGIN_SERVER}/circleguard-auth:${BUILD_NUMBER}         |
-| Identity        | 8083   | ${ACR_LOGIN_SERVER}/circleguard-identity:${BUILD_NUMBER}     |
-| Promotion       | 8088   | ${ACR_LOGIN_SERVER}/circleguard-promotion:${BUILD_NUMBER}    |
-| Notification    | 8082   | ${ACR_LOGIN_SERVER}/circleguard-notification:${BUILD_NUMBER} |
-| Form            | 8086   | ${ACR_LOGIN_SERVER}/circleguard-form:${BUILD_NUMBER}         |
-| Gateway         | 8087   | ${ACR_LOGIN_SERVER}/circleguard-gateway:${BUILD_NUMBER}      |
+| Servicio        | Puerto | Imagen                                                        |
+|-----------------|--------|---------------------------------------------------------------|
+| Auth            | 8180   | ${ACR_LOGIN_SERVER}/circleguard-auth:${BUILD_NUMBER}          |
+| Identity        | 8083   | ${ACR_LOGIN_SERVER}/circleguard-identity:${BUILD_NUMBER}      |
+| Promotion       | 8088   | ${ACR_LOGIN_SERVER}/circleguard-promotion:${BUILD_NUMBER}     |
+| Notification    | 8082   | ${ACR_LOGIN_SERVER}/circleguard-notification:${BUILD_NUMBER}  |
+| Form            | 8086   | ${ACR_LOGIN_SERVER}/circleguard-form:${BUILD_NUMBER}          |
+| Gateway         | 8087   | ${ACR_LOGIN_SERVER}/circleguard-gateway:${BUILD_NUMBER}       |
 NOTES
                 '''
             }
@@ -251,8 +231,8 @@ NOTES
 
         stage('Deploy to Prod') {
             input {
-                message "Desplegar build ${BUILD_NUMBER} a PRODUCCIÓN?"
-                ok "Sí, desplegar"
+                message "Desplegar build ${BUILD_NUMBER} a PRODUCCION?"
+                ok "Si, desplegar"
             }
             steps {
                 withCredentials([
@@ -282,8 +262,8 @@ NOTES
     }
 
     post {
-        success { echo "Release v${BUILD_NUMBER} desplegado en producción exitosamente" }
-        failure { echo "Pipeline MASTER falló en build ${BUILD_NUMBER}" }
+        success { echo "Release v${BUILD_NUMBER} desplegado en produccion exitosamente" }
+        failure { echo "Pipeline MASTER fallo en build ${BUILD_NUMBER}" }
         always  { cleanWs() }
     }
 }
