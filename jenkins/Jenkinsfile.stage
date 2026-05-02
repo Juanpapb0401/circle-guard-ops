@@ -1,11 +1,11 @@
-// Pipeline STAGE — build + unit tests + integration tests + docker push + deploy a circleguard-stage
+// Pipeline STAGE — build + unit/integration tests + docker push + deploy a circleguard-stage + smoke tests
 // Credenciales requeridas: mismas que Jenkinsfile.dev
 
 pipeline {
     agent any
 
     parameters {
-        string(name: 'DEV_REPO_BRANCH', defaultValue: 'main', description: 'Branch del dev repo (normalmente main)')
+        string(name: 'DEV_REPO_BRANCH', defaultValue: 'main', description: 'Branch del dev repo')
     }
 
     environment {
@@ -27,48 +27,18 @@ pipeline {
             }
         }
 
-        stage('Build') {
+        stage('Build & Test') {
+            // Una sola invocación Gradle: compila + unit tests + integration tests en paralelo.
+            // Al final renombra cada bootJar a app.jar (nombre esperado por los Dockerfiles).
             steps {
                 dir('src') {
-                    sh './gradlew build -x test --parallel'
-                }
-            }
-        }
-
-        stage('Unit Tests') {
-            steps {
-                dir('src') {
+                    sh './gradlew build --parallel'
                     sh '''
-                        ./gradlew \
-                            :services:circleguard-auth-service:test \
-                            :services:circleguard-identity-service:test \
-                            :services:circleguard-form-service:test \
-                            :services:circleguard-gateway-service:test \
-                            :services:circleguard-notification-service:test \
-                            --parallel
-                    '''
-                }
-            }
-            post {
-                always {
-                    junit 'src/services/*/build/test-results/**/*.xml'
-                }
-            }
-        }
-
-        stage('Integration Tests') {
-            // Testcontainers levanta Neo4j, Redis, Kafka en contenedores efímeros.
-            // Requiere que el agente de Jenkins tenga acceso a Docker (socket montado).
-            steps {
-                dir('src') {
-                    sh '''
-                        ./gradlew \
-                            :services:circleguard-auth-service:test \
-                            :services:circleguard-identity-service:test \
-                            :services:circleguard-form-service:test \
-                            :services:circleguard-gateway-service:test \
-                            :services:circleguard-notification-service:test \
-                            --parallel
+                        for SERVICE in ${SERVICES}; do
+                            LIBS="services/circleguard-${SERVICE}-service/build/libs"
+                            JAR=$(ls ${LIBS}/*.jar | grep -v plain | head -1)
+                            cp "$JAR" "${LIBS}/app.jar"
+                        done
                     '''
                 }
             }
@@ -80,6 +50,8 @@ pipeline {
         }
 
         stage('Docker Build & Push') {
+            // Builds en paralelo (subshells en background + wait).
+            // --platform linux/amd64 requerido: Jenkins corre en macOS Apple Silicon, AKS es linux/amd64.
             steps {
                 withCredentials([
                     string(credentialsId: 'AZURE_CLIENT_ID',      variable: 'ARM_CLIENT_ID'),
@@ -96,14 +68,18 @@ pipeline {
                         az acr login --name ${ACR_NAME}
 
                         for SERVICE in ${SERVICES}; do
-                            docker build \
-                                -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER} \
-                                -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:stage \
-                                -f src/services/circleguard-${SERVICE}-service/Dockerfile \
-                                src/
-                            docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}
-                            docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:stage
+                            (
+                                docker build \
+                                    --platform linux/amd64 \
+                                    -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER} \
+                                    -t ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:stage \
+                                    -f src/services/circleguard-${SERVICE}-service/Dockerfile \
+                                    src/
+                                docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:${BUILD_NUMBER}
+                                docker push ${ACR_LOGIN_SERVER}/circleguard-${SERVICE}:stage
+                            ) &
                         done
+                        wait $(jobs -p)
                     '''
                 }
             }
@@ -125,6 +101,7 @@ pipeline {
                             git commit -m "ci(stage): update image tags to build ${BUILD_NUMBER} [skip ci]"
 
                         OPS_ORIGIN=$(git remote get-url origin | sed "s|https://|https://${GH_TOKEN}@|")
+                        git pull --rebase ${OPS_ORIGIN} main
                         git push ${OPS_ORIGIN} HEAD:main
                     '''
                 }
@@ -157,10 +134,40 @@ pipeline {
                 }
             }
         }
+
+        stage('Smoke Tests') {
+            // Pruebas de la aplicación desplegada en Kubernetes (Actividad 4).
+            // Verifica /actuator/health de cada servicio vía port-forward.
+            steps {
+                sh '''
+                    kubectl port-forward -n ${NAMESPACE} svc/auth-service         8180:8180 &
+                    kubectl port-forward -n ${NAMESPACE} svc/identity-service     8083:8083 &
+                    kubectl port-forward -n ${NAMESPACE} svc/form-service         8086:8086 &
+                    kubectl port-forward -n ${NAMESPACE} svc/gateway-service      8087:8087 &
+                    kubectl port-forward -n ${NAMESPACE} svc/promotion-service    8088:8088 &
+                    kubectl port-forward -n ${NAMESPACE} svc/notification-service 8082:8082 &
+                    sleep 15
+
+                    FAILED=0
+                    for PORT in 8180 8083 8086 8087 8088 8082; do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${PORT}/actuator/health)
+                        if [ "$STATUS" = "200" ]; then
+                            echo "SMOKE OK  — port ${PORT} → HTTP ${STATUS}"
+                        else
+                            echo "SMOKE FAIL — port ${PORT} → HTTP ${STATUS}"
+                            FAILED=1
+                        fi
+                    done
+
+                    pkill -f "kubectl port-forward" || true
+                    exit $FAILED
+                '''
+            }
+        }
     }
 
     post {
-        success { echo "Build ${BUILD_NUMBER} desplegado en ${NAMESPACE}" }
+        success { echo "Build ${BUILD_NUMBER} desplegado y verificado en ${NAMESPACE}" }
         failure { echo "Pipeline STAGE falló en build ${BUILD_NUMBER}" }
         always  { cleanWs() }
     }
