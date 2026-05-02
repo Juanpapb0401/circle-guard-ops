@@ -17,6 +17,7 @@ pipeline {
         PROD_NAMESPACE   = 'circleguard-prod'
         DEV_REPO_URL     = 'https://github.com/Juanpapb0401/circle-guard-public.git'
         SERVICES         = 'auth identity promotion notification form gateway'
+        PIPELINE_BRANCH  = "${params.DEV_REPO_BRANCH}"
     }
 
     stages {
@@ -193,7 +194,7 @@ pipeline {
                         echo ""
                         echo "**Fecha:** $(date +%Y-%m-%d)"
                         echo "**Build:** ${BUILD_NUMBER}"
-                        echo "**Branch:** ${params.DEV_REPO_BRANCH}"
+                        echo "**Branch:** ${PIPELINE_BRANCH}"
                         if [ -n "$TAG_LINE" ]; then echo "$TAG_LINE"; fi
                         echo ""
                         echo "## Cambios incluidos"
