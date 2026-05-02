@@ -178,33 +178,39 @@ pipeline {
 
                     if [ -z "$PREV_TAG" ]; then
                         COMMITS=$(git -C src log --oneline --pretty=format:"- %h %s (%an)")
+                        TAG_LINE=""
                     else
                         COMMITS=$(git -C src log ${PREV_TAG}..HEAD --oneline --pretty=format:"- %h %s (%an)")
+                        TAG_LINE="**Desde tag:** ${PREV_TAG}"
                     fi
 
-                    cat > release-notes.md << NOTES
-# Release Notes — v${BUILD_NUMBER}
+                    if [ -z "$COMMITS" ]; then
+                        COMMITS="Sin commits nuevos desde el ultimo tag"
+                    fi
 
-**Fecha:** $(date +%Y-%m-%d)
-**Build:** ${BUILD_NUMBER}
-**Branch:** ${params.DEV_REPO_BRANCH}
-${PREV_TAG:+**Desde tag:** ${PREV_TAG}}
-
-## Cambios incluidos
-
-${COMMITS:-Sin commits nuevos desde el último tag}
-
-## Servicios desplegados
-
-| Servicio        | Puerto | Imagen                                                        |
-|-----------------|--------|---------------------------------------------------------------|
-| Auth            | 8180   | ${ACR_LOGIN_SERVER}/circleguard-auth:${BUILD_NUMBER}          |
-| Identity        | 8083   | ${ACR_LOGIN_SERVER}/circleguard-identity:${BUILD_NUMBER}      |
-| Promotion       | 8088   | ${ACR_LOGIN_SERVER}/circleguard-promotion:${BUILD_NUMBER}     |
-| Notification    | 8082   | ${ACR_LOGIN_SERVER}/circleguard-notification:${BUILD_NUMBER}  |
-| Form            | 8086   | ${ACR_LOGIN_SERVER}/circleguard-form:${BUILD_NUMBER}          |
-| Gateway         | 8087   | ${ACR_LOGIN_SERVER}/circleguard-gateway:${BUILD_NUMBER}       |
-NOTES
+                    {
+                        echo "# Release Notes -- v${BUILD_NUMBER}"
+                        echo ""
+                        echo "**Fecha:** $(date +%Y-%m-%d)"
+                        echo "**Build:** ${BUILD_NUMBER}"
+                        echo "**Branch:** ${params.DEV_REPO_BRANCH}"
+                        if [ -n "$TAG_LINE" ]; then echo "$TAG_LINE"; fi
+                        echo ""
+                        echo "## Cambios incluidos"
+                        echo ""
+                        echo "$COMMITS"
+                        echo ""
+                        echo "## Servicios desplegados"
+                        echo ""
+                        echo "| Servicio        | Puerto | Imagen                                                        |"
+                        echo "|-----------------|--------|---------------------------------------------------------------|"
+                        echo "| Auth            | 8180   | ${ACR_LOGIN_SERVER}/circleguard-auth:${BUILD_NUMBER}          |"
+                        echo "| Identity        | 8083   | ${ACR_LOGIN_SERVER}/circleguard-identity:${BUILD_NUMBER}      |"
+                        echo "| Promotion       | 8088   | ${ACR_LOGIN_SERVER}/circleguard-promotion:${BUILD_NUMBER}     |"
+                        echo "| Notification    | 8082   | ${ACR_LOGIN_SERVER}/circleguard-notification:${BUILD_NUMBER}  |"
+                        echo "| Form            | 8086   | ${ACR_LOGIN_SERVER}/circleguard-form:${BUILD_NUMBER}          |"
+                        echo "| Gateway         | 8087   | ${ACR_LOGIN_SERVER}/circleguard-gateway:${BUILD_NUMBER}       |"
+                    } > release-notes.md
                 '''
             }
             post {
