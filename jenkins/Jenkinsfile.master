@@ -165,7 +165,7 @@ pipeline {
             }
             post {
                 always {
-                    junit allowEmptyResults: true, testResults: 'e2e-results.xml'
+                    junit 'e2e-results.xml'
                     archiveArtifacts artifacts: 'locust-report*.html,locust-report*.csv', allowEmptyArchive: true
                 }
             }
