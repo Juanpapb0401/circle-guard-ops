@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: gateway-service
-          image: circleguardacr.azurecr.io/circleguard-gateway:3
+          image: circleguardacr.azurecr.io/circleguard-gateway:4
           ports:
             - containerPort: 8087
           env:
